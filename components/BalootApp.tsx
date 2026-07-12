@@ -6,6 +6,7 @@ import type {
   Card,
   DoubleCall,
   LegalBid,
+  ProjectKind,
   PublicGameView,
   Seat,
   Suit,
@@ -18,6 +19,15 @@ import type {
 import { AVATARS, type AvatarId } from "../lib/server/session";
 
 type ConnectionState = "online" | "syncing" | "offline";
+type CardAvailability = "display" | "legal" | "blocked";
+type TablePosition = "bottom" | "right" | "top" | "left";
+
+const TABLE_POSITIONS: Array<{ offset: 0 | 1 | 2 | 3; position: TablePosition }> = [
+  { offset: 0, position: "bottom" },
+  { offset: 1, position: "right" },
+  { offset: 2, position: "top" },
+  { offset: 3, position: "left" },
+];
 
 const SUIT_META: Record<Suit, { symbol: string; name: string }> = {
   spades: { symbol: "♠", name: "سبيت" },
@@ -89,22 +99,21 @@ function cardName(card: Card): string {
 
 function PlayingCard({
   card,
-  legal = true,
+  availability = "display",
   selected = false,
   trump = false,
   onClick,
-  onDoubleClick,
   shortcut,
 }: {
   card: Card;
-  legal?: boolean;
+  availability?: CardAvailability;
   selected?: boolean;
   trump?: boolean;
   onClick?: () => void;
-  onDoubleClick?: () => void;
   shortcut?: number;
 }) {
   const interactive = Boolean(onClick);
+  const playable = availability === "legal";
   const red = card.suit === "hearts" || card.suit === "diamonds";
   const content = (
     <>
@@ -113,7 +122,8 @@ function PlayingCard({
         <i>{SUIT_META[card.suit].symbol}</i>
       </span>
       <span className="card-center" aria-hidden="true">
-        {SUIT_META[card.suit].symbol}
+        <b>{card.rank}</b>
+        <i>{SUIT_META[card.suit].symbol}</i>
       </span>
       <span className="card-corner card-corner-bottom" aria-hidden="true">
         <b>{card.rank}</b>
@@ -121,6 +131,7 @@ function PlayingCard({
       </span>
       {trump ? <span className="trump-mark">حكم</span> : null}
       {shortcut ? <span className="card-shortcut">{shortcut}</span> : null}
+      {interactive && availability === "blocked" ? <span className="card-lock">غير متاحة</span> : null}
     </>
   );
   if (!interactive) {
@@ -134,14 +145,13 @@ function PlayingCard({
     <button
       type="button"
       className="playing-card hand-card"
-      data-legal={legal}
+      data-availability={availability}
       data-red={red}
       data-selected={selected}
       data-trump={trump}
-      disabled={!legal}
+      disabled={!playable}
       onClick={onClick}
-      onDoubleClick={onDoubleClick}
-      aria-label={`${cardName(card)}${trump ? "، حكم" : ""}${legal ? "، قابلة للعب" : "، غير قابلة للعب"}`}
+      aria-label={`${cardName(card)}${trump ? "، حكم" : ""}${availability === "legal" ? "، قابلة للعب، اضغط مرتين للرمي" : availability === "blocked" ? "، غير قانونية الآن" : "، ظاهرة للمراجعة"}`}
       aria-pressed={selected}
     >
       {content}
@@ -166,12 +176,14 @@ function ConnectionPill({ state }: { state: ConnectionState }) {
 function PlayerSeat({
   player,
   position,
+  relation,
   active,
   dealer,
   cards,
 }: {
   player?: RoomPlayerView;
-  position: "bottom" | "right" | "top" | "left";
+  position: TablePosition;
+  relation: "you" | "partner" | "opponent";
   active: boolean;
   dealer: boolean;
   cards: number;
@@ -179,13 +191,15 @@ function PlayerSeat({
   if (!player) return null;
   const initials = player.displayName.slice(0, 2);
   return (
-    <div className={`player-seat seat-${position}`} data-active={active}>
+    <div className={`player-seat seat-${position}`} data-active={active} data-team={relation === "you" || relation === "partner" ? "us" : "them"} aria-current={active ? "true" : undefined}>
       <div className="player-avatar" data-avatar={player.avatar} aria-hidden="true">
         {player.isBot ? AVATAR_META[player.avatar].icon : initials}
       </div>
       <div className="player-copy">
         <div className="player-name-row">
           <strong>{player.displayName}</strong>
+          {relation === "you" ? <span className="relation-tag">أنت</span> : null}
+          {relation === "partner" ? <span className="relation-tag partner-tag">شريكك</span> : null}
           {player.isBot ? <span className="bot-tag">آلي</span> : null}
           {dealer ? <span className="dealer-tag" title="الموزع">م</span> : null}
         </div>
@@ -193,6 +207,8 @@ function PlayerSeat({
           {player.connected ? "متصل" : "يعيد الاتصال"} · {cards} ورق
         </span>
       </div>
+      <span className="card-count-badge">ورق × {cards}</span>
+      {active ? <span className="turn-badge">دوره</span> : null}
       {position !== "bottom" && cards > 0 ? (
         <div className="opponent-cards" aria-label={`${cards} أوراق متبقية`}>
           {Array.from({ length: Math.min(cards, 5) }, (_, index) => (
@@ -200,6 +216,62 @@ function PlayerSeat({
           ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function projectLabel(kind: ProjectKind): string {
+  if (kind === "sequence_three") return "سرا";
+  if (kind === "sequence_four") return "خمسين";
+  if (kind === "sequence_hundred" || kind === "four_kind_hundred") return "مائة";
+  if (kind === "four_hundred") return "أربعمائة";
+  return "بلوت";
+}
+
+function TrickBoard({
+  trick,
+  mySeat,
+  players,
+  trump,
+  showingLast,
+}: {
+  trick: PublicGameView["currentTrick"];
+  mySeat: Seat;
+  players: RoomPlayerView[];
+  trump: Suit | null;
+  showingLast: boolean;
+}) {
+  const winner = trick.winner === null ? undefined : players.find((player) => player.seat === trick.winner);
+  return (
+    <div className="trick-center" data-last={showingLast} aria-label={showingLast ? "اللمة السابقة" : "اللمة الحالية"}>
+      <div className="trick-caption" aria-live="polite">
+        <strong>{showingLast ? "اللمة السابقة" : "اللمة الحالية"}</strong>
+        <span>{showingLast ? `أخذها ${winner?.displayName ?? "اللاعب"}` : `${trick.plays.length} من 4`}</span>
+      </div>
+      {TABLE_POSITIONS.map(({ offset, position }) => {
+        const seat = ((mySeat + offset) % 4) as Seat;
+        const playIndex = trick.plays.findIndex((play) => play.seat === seat);
+        const play = playIndex >= 0 ? trick.plays[playIndex] : undefined;
+        const owner = players.find((player) => player.seat === seat);
+        const ownerLabel = offset === 0 ? "أنت" : owner?.displayName ?? "اللاعب";
+        const team = offset % 2 === 0 ? "us" : "them";
+        return (
+          <div
+            className={`trick-card trick-${position}`}
+            data-filled={Boolean(play)}
+            data-team={team}
+            data-winner={showingLast && trick.winner === seat}
+            key={seat}
+          >
+            <span className="trick-owner"><b>{ownerLabel}</b>{play ? <i>{playIndex + 1}</i> : null}</span>
+            {play ? (
+              <PlayingCard card={play.card} trump={trump === play.card.suit} />
+            ) : (
+              <span className="trick-empty" aria-label={`${ownerLabel} لم يرمِ بعد`}>بانتظار الورقة</span>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -273,7 +345,7 @@ function DoublingPanel({
       {isMyTurn ? (
         <div className="decision-actions">
           {game.legalDoubleCalls.flatMap((call) => {
-            if (call === "double" || call === "four") {
+            if ((call === "double" || call === "four") && game.contract?.kind === "hokom") {
               return [
                 <button type="button" className="action-primary" disabled={busy} key={`${call}-open`} onClick={() => onDouble(call, false)}>
                   {DOUBLE_LABELS[call]} مفتوح
@@ -374,13 +446,56 @@ export function BalootApp() {
   const [error, setError] = useState("");
   const [connection, setConnection] = useState<ConnectionState>("online");
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
+  const selectedCardRef = useRef<string | null>(null);
+  const actionInFlightRef = useRef(false);
+  const lastTrickKeyRef = useRef("");
+  const lastTrickTimerRef = useRef(0);
+  const [previewLastTrick, setPreviewLastTrick] = useState(false);
+  const [reviewLastTrick, setReviewLastTrick] = useState(false);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const clientInstanceId = useRef("");
 
-  useEffect(() => {
-    roomRef.current = room;
-  }, [room]);
+  const clearCardSelection = useCallback(() => {
+    selectedCardRef.current = null;
+    setSelectedCard(null);
+  }, []);
+
+  const syncTrickPreview = useCallback((nextRoom: RoomView) => {
+    const game = nextRoom.game;
+    const nextKey = game?.completedTrick
+      ? `${game.roundNumber}:${game.tricksWon[0] + game.tricksWon[1]}`
+      : "";
+    if (!nextKey) {
+      if (lastTrickKeyRef.current) {
+        setPreviewLastTrick(false);
+        setReviewLastTrick(false);
+      }
+      lastTrickKeyRef.current = "";
+      window.clearTimeout(lastTrickTimerRef.current);
+      return;
+    }
+    if (lastTrickKeyRef.current === nextKey) return;
+    lastTrickKeyRef.current = nextKey;
+    setReviewLastTrick(false);
+    setPreviewLastTrick(true);
+    window.clearTimeout(lastTrickTimerRef.current);
+    lastTrickTimerRef.current = window.setTimeout(() => setPreviewLastTrick(false), 950);
+  }, []);
+
+  const receiveRoom = useCallback((nextRoom: RoomView) => {
+    roomRef.current = nextRoom;
+    setRoom(nextRoom);
+    syncTrickPreview(nextRoom);
+    const selected = selectedCardRef.current;
+    const game = nextRoom.game;
+    if (
+      selected &&
+      (!game || game.phase !== "playing" || game.currentPlayer !== game.seat || !game.legalCardIds.includes(selected))
+    ) clearCardSelection();
+  }, [clearCardSelection, syncTrickPreview]);
+
+  useEffect(() => () => window.clearTimeout(lastTrickTimerRef.current), []);
 
   useEffect(() => {
     const bootstrap = window.setTimeout(() => {
@@ -396,7 +511,7 @@ export function BalootApp() {
       void (async () => {
         try {
           const payload = await responseJson<{ room: RoomView }>(await fetch(`/api/rooms/${code}`, { cache: "no-store" }));
-          setRoom(payload.room);
+          receiveRoom(payload.room);
           setInvitedCode("");
         } catch (requestError) {
           if (!(requestError instanceof RequestError) || requestError.status !== 401) {
@@ -406,7 +521,7 @@ export function BalootApp() {
       })();
     }, 0);
     return () => window.clearTimeout(bootstrap);
-  }, []);
+  }, [receiveRoom]);
 
   const rememberProfile = useCallback(() => {
     window.localStorage.setItem("majlis-baloot-name", displayName.trim());
@@ -414,12 +529,14 @@ export function BalootApp() {
   }, [avatar, displayName]);
 
   const enterRoom = useCallback((nextRoom: RoomView) => {
-    setRoom(nextRoom);
-    roomRef.current = nextRoom;
-    setSelectedCard(null);
+    clearCardSelection();
+    setReviewLastTrick(false);
+    setPreviewLastTrick(false);
+    lastTrickKeyRef.current = "";
+    receiveRoom(nextRoom);
     setError("");
     window.history.replaceState({}, "", roomUrl(nextRoom.code));
-  }, []);
+  }, [clearCardSelection, receiveRoom]);
 
   const create = useCallback(async (mode: "multiplayer" | "quick") => {
     if (displayName.trim().length < 2) {
@@ -478,9 +595,8 @@ export function BalootApp() {
     const response = await fetch(`/api/rooms/${current.code}${query}`, { cache: "no-store" });
     if (response.status === 204) return;
     const payload = await responseJson<{ room: RoomView }>(response);
-    setRoom(payload.room);
-    roomRef.current = payload.room;
-  }, []);
+    receiveRoom(payload.room);
+  }, [receiveRoom]);
 
   const activeRoomCode = room?.code;
 
@@ -531,7 +647,8 @@ export function BalootApp() {
 
   const sendAction = useCallback(async (action: RoomClientAction) => {
     const current = roomRef.current;
-    if (!current || busy) return;
+    if (!current || actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
     setBusy(true);
     setConnection("syncing");
     setError("");
@@ -547,42 +664,87 @@ export function BalootApp() {
           }),
         }),
       );
-      setRoom(payload.room);
-      roomRef.current = payload.room;
-      setSelectedCard(null);
+      receiveRoom(payload.room);
+      clearCardSelection();
+      setReviewLastTrick(false);
       setConnection("online");
     } catch (requestError) {
       if (requestError instanceof RequestError && requestError.status === 409) {
         await fetchCurrentRoom(true).catch(() => undefined);
       }
       setError(requestError instanceof Error ? requestError.message : "تعذر تنفيذ الحركة.");
-      setConnection("offline");
+      setConnection(requestError instanceof RequestError ? "online" : "offline");
     } finally {
+      actionInFlightRef.current = false;
       setBusy(false);
     }
-  }, [busy, fetchCurrentRoom]);
+  }, [clearCardSelection, fetchCurrentRoom, receiveRoom]);
+
+  const tryPlayCard = useCallback((cardId: string) => {
+    const game = roomRef.current?.game;
+    if (
+      !game ||
+      actionInFlightRef.current ||
+      game.phase !== "playing" ||
+      game.currentPlayer !== game.seat ||
+      !game.hand.some((card) => card.id === cardId) ||
+      !game.legalCardIds.includes(cardId)
+    ) return;
+    clearCardSelection();
+    void sendAction({ type: "play_card", cardId });
+  }, [clearCardSelection, sendAction]);
+
+  const handleCardPress = useCallback((cardId: string) => {
+    const game = roomRef.current?.game;
+    if (
+      !game ||
+      actionInFlightRef.current ||
+      game.phase !== "playing" ||
+      game.currentPlayer !== game.seat ||
+      !game.legalCardIds.includes(cardId)
+    ) return;
+    if (selectedCardRef.current === cardId) {
+      tryPlayCard(cardId);
+      return;
+    }
+    selectedCardRef.current = cardId;
+    setSelectedCard(cardId);
+  }, [tryPlayCard]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (
+        event.repeat ||
+        rulesOpen ||
+        (target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(target.tagName)))
+      ) return;
       const game = roomRef.current?.game;
       if (!game || game.phase !== "playing" || game.currentPlayer !== game.seat) return;
       if (/^[1-8]$/.test(event.key)) {
-        const target = game.hand[Number(event.key) - 1];
-        if (target && game.legalCardIds.includes(target.id)) setSelectedCard(target.id);
+        const card = game.hand[Number(event.key) - 1];
+        if (card && game.legalCardIds.includes(card.id)) {
+          selectedCardRef.current = card.id;
+          setSelectedCard(card.id);
+        }
       } else if (event.key === "Escape") {
-        setSelectedCard(null);
-      } else if (event.key === "Enter" && selectedCard) {
-        void sendAction({ type: "play_card", cardId: selectedCard });
+        clearCardSelection();
+      } else if (event.key === "Enter" && selectedCardRef.current) {
+        tryPlayCard(selectedCardRef.current);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedCard, sendAction]);
+  }, [clearCardSelection, rulesOpen, tryPlayCard]);
 
   const leave = () => {
     setRoom(null);
     roomRef.current = null;
-    setSelectedCard(null);
+    clearCardSelection();
+    setReviewLastTrick(false);
+    setPreviewLastTrick(false);
+    lastTrickKeyRef.current = "";
+    window.clearTimeout(lastTrickTimerRef.current);
     setError("");
     const url = new URL(window.location.href);
     url.search = "";
@@ -676,12 +838,34 @@ export function BalootApp() {
   const mySeat = game.seat;
   const myTeam = (mySeat % 2) as 0 | 1;
   const otherTeam = (1 - myTeam) as 0 | 1;
-  const positions: Array<{ offset: 0 | 1 | 2 | 3; position: "bottom" | "right" | "top" | "left" }> = [
-    { offset: 0, position: "bottom" }, { offset: 1, position: "right" }, { offset: 2, position: "top" }, { offset: 3, position: "left" },
-  ];
   const contractLabel = game.contract ? game.contract.kind === "sun" ? "صن" : `حكم ${game.contract.trump ? SUIT_META[game.contract.trump].symbol : ""}` : `المزايدة · ${game.auction.round === 1 ? "أول" : "ثاني"}`;
+  const playerName = (seat: Seat) => room.players.find((player) => player.seat === seat)?.displayName ?? "اللاعب";
+  const buyerName = game.contract ? playerName(game.contract.bidder) : "لم يُحسم";
+  const riskName = game.contract ? playerName(game.contract.riskTaker) : "";
+  const doublerName = game.contract?.doubler === null || game.contract?.doubler === undefined ? "" : playerName(game.contract.doubler);
+  const contractContext = game.contract
+    ? [
+        contractLabel,
+        game.contract.multiplier > 1 ? `×${game.contract.multiplier}` : "",
+        game.contract.multiplier > 1 && game.contract.kind === "hokom" ? (game.contract.locked ? "مقفل" : "مفتوح") : "",
+        doublerName ? `دبّل ${doublerName}` : "",
+        game.contract.ashkal ? "أشكل" : "",
+        game.contract.coffee ? "قهوة" : "",
+      ].filter(Boolean).join(" · ")
+    : contractLabel;
+  const buyerContext = game.contract && game.contract.riskTaker !== game.contract.bidder
+    ? `${buyerName} · المخاطرة ${riskName}`
+    : buyerName;
+  const completedTrickCount = game.tricksWon[0] + game.tricksWon[1];
+  const trickNumber = Math.min(8, completedTrickCount + (game.phase === "playing" ? 1 : 0));
+  const isMyPlayingTurn = game.phase === "playing" && game.currentPlayer === mySeat;
+  const showingLastTrick = Boolean(
+    game.completedTrick &&
+    (reviewLastTrick || previewLastTrick || (game.phase === "playing" && game.currentTrick.plays.length === 0)),
+  );
+  const visibleTrick = showingLastTrick && game.completedTrick ? game.completedTrick : game.currentTrick;
   const selected = game.hand.find((item) => item.id === selectedCard);
-  const canPlaySelected = selected && game.legalCardIds.includes(selected.id) && game.currentPlayer === mySeat;
+  const currentPlayerName = playerName(game.currentPlayer);
 
   return (
     <main className="game-shell">
@@ -693,32 +877,60 @@ export function BalootApp() {
       {connection === "offline" ? <div className="reconnect-banner">جارٍ استعادة الاتصال بالطاولة…</div> : null}
       <section className="table-stage" aria-label="طاولة البلوت">
         <div className="table-surface"><div className="felt-ornament">✦</div><div className="felt-ring" /></div>
-        {positions.map(({ offset, position }) => {
+        {TABLE_POSITIONS.map(({ offset, position }) => {
           const seat = ((mySeat + offset) % 4) as Seat;
-          return <PlayerSeat key={seat} position={position} player={room.players.find((player) => player.seat === seat)} active={game.currentPlayer === seat} dealer={game.dealer === seat} cards={game.handCounts[seat]} />;
+          const relation = offset === 0 ? "you" : offset === 2 ? "partner" : "opponent";
+          return <PlayerSeat key={seat} position={position} relation={relation} player={room.players.find((player) => player.seat === seat)} active={game.currentPlayer === seat} dealer={game.dealer === seat} cards={game.handCounts[seat]} />;
         })}
-        <div className="table-status" aria-live="polite"><span>الجولة {game.roundNumber}</span><strong>{game.currentPlayer === mySeat ? "دورك الآن" : `دور ${room.players.find((player) => player.seat === game.currentPlayer)?.displayName ?? "اللاعب"}`}</strong></div>
+        <div className="round-info" aria-label="معلومات الجولة الأساسية">
+          <span className="info-chip info-contract"><small>اللعب</small><b>{contractContext}</b></span>
+          <span className="info-chip info-buyer"><small>المشتري</small><b>{buyerContext}</b></span>
+          <span className="info-chip"><small>اللمة</small><b>{trickNumber}/8</b></span>
+          <span className="info-chip"><small>اللمم لنا — لهم</small><b>{game.tricksWon[myTeam]} — {game.tricksWon[otherTeam]}</b></span>
+          {game.completedTrick && game.currentTrick.plays.length > 0 ? (
+            <button
+              type="button"
+              className="previous-trick-button"
+              aria-pressed={showingLastTrick}
+              onClick={() => {
+                if (showingLastTrick) {
+                  setPreviewLastTrick(false);
+                  setReviewLastTrick(false);
+                } else {
+                  setReviewLastTrick(true);
+                }
+              }}
+            >
+              {showingLastTrick ? "اللمة الحالية" : "اللمة السابقة"}
+            </button>
+          ) : null}
+        </div>
+        <div className="table-status" data-mine={game.currentPlayer === mySeat} aria-live="polite">
+          <span>{game.phase === "playing" ? "اللعب" : game.phase === "doubling" ? "التدبيل" : `المزايدة · ${game.auction.round === 1 ? "أول" : "ثاني"}`}</span>
+          <strong>{game.currentPlayer === mySeat ? "دورك الآن" : `دور ${currentPlayerName}`}</strong>
+          <small>{isMyPlayingTurn ? (selected ? `اضغط ${cardName(selected)} مرة ثانية للرمي` : "اختر ورقة واضغطها مرة ثانية") : game.phase === "playing" ? "راقب الورقة التي سيرميها اللاعب" : "تابع القرار من لوحة اللعب"}</small>
+        </div>
         {game.phase === "bidding" || game.phase === "doubling" ? (
           <div className="market-card"><span>المشترى</span><PlayingCard card={game.faceUpCard} trump={game.contract?.trump === game.faceUpCard.suit} /></div>
         ) : null}
-        <div className="trick-center">
-          {game.currentTrick.plays.map((play) => {
-            const relative = (play.seat - mySeat + 4) % 4;
-            const pos = ["bottom", "right", "top", "left"][relative];
-            return <div className={`trick-card trick-${pos}`} key={`${play.seat}-${play.card.id}`}><PlayingCard card={play.card} trump={game.contract?.trump === play.card.suit} /></div>;
-          })}
-        </div>
+        {game.phase === "playing" ? <TrickBoard trick={visibleTrick} mySeat={mySeat} players={room.players} trump={game.contract?.trump ?? null} showingLast={showingLastTrick} /> : null}
         {game.phase === "bidding" ? <BidPanel game={game} busy={busy} onBid={(bid) => void sendAction({ type: "bid", call: bid.call as AuctionCall, ...(bid.suit ? { suit: bid.suit } : {}) })} /> : null}
         {game.phase === "doubling" ? <DoublingPanel game={game} busy={busy} onDouble={(call, locked) => void sendAction({ type: "double", call, ...(locked === undefined ? {} : { locked }) })} /> : null}
-        {game.projects?.counted.length ? <div className="project-strip">{game.projects.counted.map((project, index) => <span key={`${project.seat}-${project.kind}-${index}`}>{project.kind === "baloot" ? "بلوت" : project.gamePoints >= 20 ? "مائة" : project.gamePoints >= 10 ? "خمسين" : "سرا"}</span>)}</div> : null}
-        <div className="hand-rail" data-turn={game.currentPlayer === mySeat && game.phase === "playing"}>
+        {game.projects?.counted.length ? <div className="project-strip">{game.projects.counted.map((project, index) => <span key={`${project.seat}-${project.kind}-${index}`}>{projectLabel(project.kind)}</span>)}</div> : null}
+        <div className="hand-rail" data-turn={isMyPlayingTurn} data-busy={busy}>
+          {game.phase === "playing" ? (
+            <div className="hand-hint" data-active={isMyPlayingTurn} aria-live="polite">
+              <strong>{isMyPlayingTurn ? (selected ? "اضغط الورقة نفسها مرة ثانية" : "دورك — اختر ورقتك") : `بانتظار ${currentPlayerName}`}</strong>
+              <span>{isMyPlayingTurn ? (selected ? `سترمي ${cardName(selected)} مباشرة` : "نقرتان على الورقة تكفيان للرمي") : "أوراقك تبقى واضحة حتى يأتي دورك"}</span>
+            </div>
+          ) : null}
           <div className="hand" role="group" aria-label="أوراقك">
             {game.hand.map((item, index) => {
               const legal = game.phase === "playing" && game.legalCardIds.includes(item.id);
-              return <PlayingCard key={item.id} card={item} legal={legal} selected={selectedCard === item.id} trump={game.contract?.trump === item.suit} shortcut={index + 1} onClick={() => setSelectedCard((current) => current === item.id ? null : item.id)} onDoubleClick={() => legal && void sendAction({ type: "play_card", cardId: item.id })} />;
+              const availability: CardAvailability = isMyPlayingTurn && !busy ? (legal ? "legal" : "blocked") : "display";
+              return <PlayingCard key={item.id} card={item} availability={availability} selected={selectedCard === item.id} trump={game.contract?.trump === item.suit} shortcut={index + 1} onClick={() => handleCardPress(item.id)} />;
             })}
           </div>
-          {game.phase === "playing" ? <button type="button" className="play-card-button" disabled={!canPlaySelected || busy} onClick={() => selected && void sendAction({ type: "play_card", cardId: selected.id })}>{game.currentPlayer === mySeat ? "العب الورقة" : "بانتظار دورك"}</button> : null}
         </div>
       </section>
       {error ? <div className="toast" role="alert"><span>{error}</span><button type="button" onClick={() => setError("")}>×</button></div> : null}

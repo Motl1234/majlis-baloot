@@ -25,11 +25,12 @@ test("production bundle contains the game, social card, and D1 migration", async
 });
 
 test("ships product metadata and removes starter artifacts", async () => {
-  const [page, layout, packageJson, css] = await Promise.all([
+  const [page, layout, packageJson, css, component] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../components/BalootApp.tsx", import.meta.url), "utf8"),
   ]);
 
   assert.match(page, /<BalootApp \/>/);
@@ -41,6 +42,14 @@ test("ships product metadata and removes starter artifacts", async () => {
   assert.match(css, /--felt:\s*#0c4936/);
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
   assert.match(css, /safe-area-inset-bottom/);
+  assert.match(css, /\.trick-owner/);
+  assert.match(css, /\.round-info/);
+  assert.match(css, /max-height:\s*520px/);
+  assert.match(css, /data-availability="display"/);
+  assert.match(component, /function TrickBoard/);
+  assert.match(component, /نقرتان على الورقة تكفيان للرمي/);
+  assert.match(component, /game\.completedTrick/);
+  assert.doesNotMatch(component, /onDoubleClick|العب الورقة|play-card-button/);
   assert.doesNotMatch(page, /_sites-preview|SkeletonPreview|codex-preview/);
   assert.doesNotMatch(layout, /Starter Project|codex-preview/);
 });

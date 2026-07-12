@@ -174,6 +174,25 @@ test("public projection exposes only the requesting player's hand", () => {
   assert.equal("deck" in view, false);
 });
 
+test("public projection keeps the last completed trick visible with every owner", () => {
+  const state = startMatch(0, createDeck());
+  state.completedTricks.push({
+    leadSeat: 1,
+    plays: [
+      { seat: 1, card: card("clubs-7") },
+      { seat: 2, card: card("clubs-8") },
+      { seat: 3, card: card("clubs-9") },
+      { seat: 0, card: card("clubs-10") },
+    ],
+    winner: 0,
+    points: 10,
+  });
+  const view = projectPublicView(state, 2);
+  assert.equal(view.completedTrick?.plays.length, 4);
+  assert.deepEqual(view.completedTrick?.plays.map((play) => play.seat), [1, 2, 3, 0]);
+  assert.equal(view.completedTrick?.winner, 0);
+});
+
 test("a sequential hundred outranks a four-kind hundred", () => {
   const state = startMatch(3, createDeck());
   state.contract = contract("sun", 0);
